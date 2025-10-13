@@ -96,12 +96,17 @@ The notebook uses the same configuration as the original `rnn_args.yaml` but wit
 
 ### Resume Training
 
-To resume from a checkpoint, uncomment and modify these lines in the configuration cell:
+The S3 trainer automatically saves checkpoints to both local storage and S3. To resume from an S3 checkpoint:
+
+1. **List available checkpoints** (use the checkpoint management cell)
+2. **Resume from S3 checkpoint** by uncommenting and modifying these lines:
 
 ```python
-args.init_from_checkpoint = True
-args.init_checkpoint_path = '/home/ec2-user/SageMaker/trained_models/baseline_rnn/checkpoint/best_checkpoint'
+RESUME_FROM_S3 = True
+S3_CHECKPOINT_TO_RESUME = 'training_results/baseline_rnn/checkpoints/checkpoint_step_10000'
 ```
+
+The trainer will automatically download and load the checkpoint from S3.
 
 ## Monitoring Training
 
@@ -115,10 +120,18 @@ The training process will output:
 
 After training, the following files will be created:
 
-- **Model Checkpoints**: Saved in the checkpoint directory
+- **Local Checkpoints**: Saved in the local checkpoint directory
+- **S3 Checkpoints**: Automatically uploaded to `s3://4k-woody-btt/training_results/baseline_rnn/checkpoints/`
 - **Training Logs**: Detailed training metrics
 - **Final Model**: Best performing model
 - **S3 Upload**: Results uploaded to `s3://4k-woody-btt/training_results/baseline_rnn/`
+
+### S3 Checkpoint Benefits
+
+- **Persistent Storage**: Checkpoints survive notebook instance restarts
+- **Easy Resume**: Resume training from any checkpoint stored in S3
+- **Backup**: Automatic backup of all training progress
+- **Cross-Instance**: Use checkpoints across different SageMaker instances
 
 ## Troubleshooting
 
@@ -127,7 +140,14 @@ After training, the following files will be created:
 1. **S3 Access Denied**: Check IAM permissions for the SageMaker execution role
 2. **Out of Memory**: Use a larger instance type (e.g., `ml.g4dn.2xlarge`)
 3. **S3 Connection Issues**: Verify S3 bucket access and network connectivity
-4. **CUDA Issues**: Verify GPU availability with `torch.cuda.is_available()`
+4. **CUDA Issues**: 
+   - The notebook automatically detects available GPUs and adjusts configuration
+   - If you get "invalid device ordinal" error, the trainer will automatically fall back to GPU 0
+   - **For ml.g4dn.xlarge instances**: Run the GPU diagnostics cell to check:
+     - NVIDIA drivers (`nvidia-smi`)
+     - CUDA installation (`nvcc --version`)
+     - PyTorch CUDA support
+   - If PyTorch CUDA is not available, the notebook will automatically install the correct version
 5. **Cache Directory Issues**: Ensure write permissions for temporary cache directory
 
 ### Performance Tips

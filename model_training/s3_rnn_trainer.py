@@ -11,6 +11,9 @@ import logging
 import sys
 import json
 import pickle
+import boto3
+import tempfile
+from botocore.exceptions import ClientError
 
 # Import the S3 dataset instead of regular dataset
 from s3_dataset import S3BrainToTextDataset, s3_train_test_split_indicies
@@ -52,6 +55,7 @@ class S3BrainToTextDecoder_Trainer:
         # Initialize the trainer
         self._setup_logging()
         self._setup_device()
+        self._setup_s3()
         self._setup_model()
         self._setup_optimizer()
         self._setup_loss()
@@ -78,13 +82,34 @@ class S3BrainToTextDecoder_Trainer:
     def _setup_device(self):
         """Setup the device for training"""
         if torch.cuda.is_available():
-            gpu_num = int(self.args.gpu_number)
+            # Get the number of available GPUs
+            num_gpus = torch.cuda.device_count()
+            self.logger.info(f"Found {num_gpus} GPU(s) available")
+            
+            # Use the specified GPU number if it exists, otherwise use GPU 0
+            requested_gpu = int(self.args.gpu_number)
+            if requested_gpu < num_gpus:
+                gpu_num = requested_gpu
+            else:
+                gpu_num = 0
+                self.logger.warning(f"Requested GPU {requested_gpu} not available. Using GPU {gpu_num} instead.")
+            
             self.device = torch.device(f'cuda:{gpu_num}')
             torch.cuda.set_device(gpu_num)
             self.logger.info(f"Using GPU {gpu_num}: {torch.cuda.get_device_name(gpu_num)}")
         else:
             self.device = torch.device('cpu')
-            self.logger.info("Using CPU")
+            self.logger.info("CUDA not available. Using CPU")
+
+    def _setup_s3(self):
+        """Setup S3 client for checkpoint saving"""
+        self.s3_client = boto3.client('s3')
+        
+        # Set up S3 checkpoint paths
+        self.s3_checkpoint_prefix = f"training_results/baseline_rnn/checkpoints/"
+        self.s3_best_checkpoint_key = f"{self.s3_checkpoint_prefix}best_checkpoint"
+        
+        self.logger.info(f"S3 checkpoint prefix: s3://{self.args.dataset.s3_bucket}/{self.s3_checkpoint_prefix}")
 
     def _setup_model(self):
         """Setup the model"""
@@ -351,7 +376,7 @@ class S3BrainToTextDecoder_Trainer:
         return batch
 
     def save_checkpoint(self, step, is_best=False):
-        """Save model checkpoint"""
+        """Save model checkpoint to both local and S3"""
         checkpoint = {
             'step': step,
             'model_state_dict': self.model.state_dict(),
@@ -361,15 +386,97 @@ class S3BrainToTextDecoder_Trainer:
             'args': self.args
         }
         
-        # Save regular checkpoint
-        checkpoint_path = os.path.join(self.args.checkpoint_dir, f'checkpoint_step_{step}')
-        torch.save(checkpoint, checkpoint_path)
+        # Save locally first
+        local_checkpoint_path = os.path.join(self.args.checkpoint_dir, f'checkpoint_step_{step}')
+        torch.save(checkpoint, local_checkpoint_path)
+        
+        # Save to S3
+        s3_checkpoint_key = f"{self.s3_checkpoint_prefix}checkpoint_step_{step}"
+        self._upload_checkpoint_to_s3(checkpoint, s3_checkpoint_key)
         
         # Save best checkpoint
         if is_best:
-            best_path = os.path.join(self.args.checkpoint_dir, 'best_checkpoint')
-            torch.save(checkpoint, best_path)
-            self.logger.info(f"Saved best checkpoint at step {step}")
+            # Save locally
+            local_best_path = os.path.join(self.args.checkpoint_dir, 'best_checkpoint')
+            torch.save(checkpoint, local_best_path)
+            
+            # Save to S3
+            self._upload_checkpoint_to_s3(checkpoint, self.s3_best_checkpoint_key)
+            self.logger.info(f"Saved best checkpoint at step {step} to both local and S3")
+
+    def _upload_checkpoint_to_s3(self, checkpoint, s3_key):
+        """Upload checkpoint to S3"""
+        try:
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as temp_file:
+                torch.save(checkpoint, temp_file.name)
+                
+                # Upload to S3
+                self.s3_client.upload_file(
+                    temp_file.name, 
+                    self.args.dataset.s3_bucket, 
+                    s3_key
+                )
+                
+                # Clean up temporary file
+                os.unlink(temp_file.name)
+                
+                self.logger.info(f"Uploaded checkpoint to s3://{self.args.dataset.s3_bucket}/{s3_key}")
+                
+        except ClientError as e:
+            self.logger.error(f"Failed to upload checkpoint to S3: {e}")
+            raise
+
+    def load_checkpoint_from_s3(self, s3_key, local_path=None):
+        """Load checkpoint from S3"""
+        try:
+            if local_path is None:
+                # Create temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as temp_file:
+                    local_path = temp_file.name
+            
+            # Download from S3
+            self.s3_client.download_file(
+                self.args.dataset.s3_bucket,
+                s3_key,
+                local_path
+            )
+            
+            # Load checkpoint
+            checkpoint = torch.load(local_path, map_location=self.device)
+            
+            # Clean up temporary file if we created it
+            if local_path.startswith('/tmp'):
+                os.unlink(local_path)
+            
+            self.logger.info(f"Loaded checkpoint from s3://{self.args.dataset.s3_bucket}/{s3_key}")
+            return checkpoint
+            
+        except ClientError as e:
+            self.logger.error(f"Failed to load checkpoint from S3: {e}")
+            raise
+
+    def resume_from_s3_checkpoint(self, s3_checkpoint_key):
+        """Resume training from an S3 checkpoint"""
+        self.logger.info(f"Resuming training from S3 checkpoint: {s3_checkpoint_key}")
+        
+        # Load checkpoint from S3
+        checkpoint = self.load_checkpoint_from_s3(s3_checkpoint_key)
+        
+        # Load model state
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Load optimizer state
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Load scheduler state
+        self.learning_rate_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # Load best validation metrics
+        self.best_val_PER = checkpoint.get('best_val_per', torch.inf)
+        
+        self.logger.info(f"Resumed from step {checkpoint['step']} with best PER: {self.best_val_PER}")
+        return checkpoint['step']
 
     def cleanup(self):
         """Clean up resources"""
