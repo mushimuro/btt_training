@@ -113,17 +113,22 @@ class S3BrainToTextDecoder_Trainer:
 
     def _setup_model(self):
         """Setup the model"""
-        self.model = GRUDecoder(
-            neural_dim=self.args.model.n_input_features,
-            n_units=self.args.model.n_units,
-            n_days=len(self.args.dataset.sessions),
-            n_classes=self.args.dataset.n_classes,
-            rnn_dropout=self.args.model.rnn_dropout,
-            input_dropout=self.args.model.input_network.input_layer_dropout,
-            n_layers=self.args.model.n_layers,
-            patch_size=self.args.model.patch_size,
-            patch_stride=self.args.model.patch_stride
-        ).to(self.device)
+        # Debug: Print the parameters being passed
+        model_params = {
+            'neural_dim': self.args.model.n_input_features,
+            'n_units': self.args.model.n_units,
+            'n_days': len(self.args.dataset.sessions),
+            'n_classes': self.args.dataset.n_classes,
+            'rnn_dropout': self.args.model.rnn_dropout,
+            'input_dropout': self.args.model.input_network.input_layer_dropout,
+            'n_layers': self.args.model.n_layers,
+            'patch_size': self.args.model.patch_size,
+            'patch_stride': self.args.model.patch_stride
+        }
+        
+        self.logger.info(f"Initializing GRUDecoder with parameters: {model_params}")
+        
+        self.model = GRUDecoder(**model_params).to(self.device)
         
         # Call torch.compile to speed up training (if available)
         try:

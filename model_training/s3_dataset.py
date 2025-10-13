@@ -267,18 +267,54 @@ def s3_train_test_split_indicies(s3_bucket, s3_prefix, sessions, test_percentage
     
     # Get all session files from S3
     file_paths = []
+    print(f"🔍 Searching for sessions in S3...")
+    print(f"  Bucket: {s3_bucket}")
+    print(f"  Prefix: {s3_prefix}")
+    print(f"  Sessions: {sessions[:3]}..." if len(sessions) > 3 else f"  Sessions: {sessions}")
+    
     for session in sessions:
         s3_session_path = f"{s3_bucket}/{s3_prefix}{session}"
+        print(f"  Checking: {s3_session_path}")
         try:
             # List files in the session directory
             files = s3_fs.ls(s3_session_path)
+            print(f"    Raw files found: {files}")
+            
+            # Filter for HDF5 files
             h5_files = [f for f in files if f.endswith('.hdf5')]
             file_paths.extend(h5_files)
+            print(f"    Found {len(h5_files)} HDF5 files: {h5_files}")
         except Exception as e:
-            print(f"Warning: Could not access session {session}: {e}")
-            continue
+            print(f"    Warning: Could not access session {session}: {e}")
+            # Try alternative approach - look for common HDF5 file patterns
+            try:
+                common_h5_files = [
+                    f"{s3_session_path}/data_train.hdf5",
+                    f"{s3_session_path}/data_val.hdf5", 
+                    f"{s3_session_path}/data_test.hdf5",
+                    f"{s3_session_path}/train.hdf5",
+                    f"{s3_session_path}/val.hdf5",
+                    f"{s3_session_path}/test.hdf5"
+                ]
+                
+                for h5_file in common_h5_files:
+                    if s3_fs.exists(h5_file):
+                        file_paths.append(h5_file)
+                        print(f"    Found HDF5 file: {h5_file}")
+                        
+            except Exception as e2:
+                print(f"    Alternative search also failed: {e2}")
+                continue
     
-    print(f"Found {len(file_paths)} HDF5 files in S3")
+    print(f"📊 Total: Found {len(file_paths)} HDF5 files in S3")
+    
+    if len(file_paths) == 0:
+        print("❌ No HDF5 files found! Please check:")
+        print("  1. S3 bucket name is correct")
+        print("  2. S3 prefix path is correct")
+        print("  3. Session names match the actual folder names in S3")
+        print("  4. You have read permissions for the S3 bucket")
+        raise ValueError("No HDF5 files found in S3. Please check your S3 configuration.")
     
     # Create temporary directory for processing
     with tempfile.TemporaryDirectory() as temp_dir:
