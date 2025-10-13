@@ -3,7 +3,3 @@
 !README.md
 !/.gitignore
 !t15_copyTaskData_description.csv
-!t15_copyTask_neuralData/
-!t15_copyTask_neuralData/*
-!t15_pretrained_rnn_baseline/
-!t15_pretrained_rnn_baseline/*
