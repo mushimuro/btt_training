@@ -9,14 +9,16 @@ from tqdm import tqdm
 import editdistance
 import argparse
 import boto3
+import s3fs
 
 from rnn_model import GRUDecoder
 from evaluate_model_helpers import *
 
-
 s3 = boto3.client("s3")
 bucket = "4k-woody-btt"
-
+fs = s3fs.S3FileSystem()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+data_path = os.path.join(BASE_DIR, "../data/t15_copyTaskData_description.csv")
 
 # --------------------------------------------------------------------------------
 # # argument parser for command line arguments
@@ -29,7 +31,7 @@ parser.add_argument('--data_dir', type=str, default='s3://4k-woody-btt/4k/data/h
 parser.add_argument('--eval_type', type=str, default='test', choices=['val', 'test'],
                     help='Evaluation type: "val" for validation set, "test" for test set. '
                          'If "test", ground truth is not available.')
-parser.add_argument('--csv_path', type=str, default='../data/t15_copyTaskData_description.csv',
+parser.add_argument('--csv_path', type=str, default=data_path,
                     help='Path to the CSV file with metadata about the dataset (relative to the current working directory).')
 parser.add_argument('--gpu_number', type=int, default=1,
                     help='GPU number to use for inference. -1 for CPU.')
@@ -47,7 +49,10 @@ eval_type = args.eval_type
 b2txt_csv_df = pd.read_csv(args.csv_path)
 
 # load model args
-model_args = OmegaConf.load(os.path.join(model_path, 'checkpoint/args.yaml'))
+# model_args = OmegaConf.load(os.path.join(model_path, 'checkpoint/args.yaml'))
+s3_args_path = os.path.join(model_path, 'checkpoint/args.yaml')
+with fs.open(s3_args_path, 'rb') as f:
+    model_args = OmegaConf.load(f)
 
 # set up gpu device
 gpu_number = args.gpu_number
@@ -77,7 +82,11 @@ model = GRUDecoder(
 )
 
 # load model weights
-checkpoint = torch.load(os.path.join(model_path, 'checkpoint/best_checkpoint'), weights_only=False)
+# checkpoint = torch.load(os.path.join(model_path, 'checkpoint/best_checkpoint'), weights_only=False)
+s3_checkpoint_path = os.path.join(model_path, 'checkpoint/best_checkpoint')
+with fs.open(s3_checkpoint_path, 'rb') as f:
+    checkpoint = torch.load(f, map_location=device, weights_only=False)
+
 # rename keys to not start with "module." (happens if model was saved with DataParallel)
 for key in list(checkpoint['model_state_dict'].keys()):
     checkpoint['model_state_dict'][key.replace("module.", "")] = checkpoint['model_state_dict'].pop(key)
@@ -93,8 +102,10 @@ model.eval()
 # load data for each session
 test_data = {}
 total_test_trials = 0
+
 for session in model_args['dataset']['sessions']:
-    files = [f for f in os.listdir(os.path.join(data_dir, session)) if f.endswith('.hdf5')]
+    files = [f for f in fs.ls(os.path.join(data_dir, session)) if f.endswith('.hdf5')]
+
     if f'data_{eval_type}.hdf5' in files:
         eval_file = os.path.join(data_dir, session, f'data_{eval_type}.hdf5')
 
@@ -103,7 +114,8 @@ for session in model_args['dataset']['sessions']:
 
         total_test_trials += len(test_data[session]["neural_features"])
         print(f'Loaded {len(test_data[session]["neural_features"])} {eval_type} trials for session {session}.')
-print(f'Total number of {eval_type} trials: {total_test_trials}')
+
+print(f"Total number of {eval_type} trials: {total_test_trials}")
 print()
 
 
